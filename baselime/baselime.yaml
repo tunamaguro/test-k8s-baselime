@@ -1,0 +1,170 @@
+---
+# Source: baselime-logs-exporter/templates/fluentbit-serviceaccount.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: baselime-metadata-collector
+---
+# Source: baselime-logs-exporter/templates/serviceaccount.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: baselime-metadata-collector
+  labels:
+    helm.sh/chart: baselime-logs-exporter-0.1.1
+    app.kubernetes.io/name: baselime-logs-exporter
+    app.kubernetes.io/instance: release-name
+    app.kubernetes.io/version: "1.16.0"
+    app.kubernetes.io/managed-by: Helm
+automountServiceAccountToken: true
+---
+# Source: baselime-logs-exporter/templates/fluentbit-configmap.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fluentbit-config
+data:
+  fluent-bit.conf: |
+    [SERVICE]
+      Flush        30
+
+    [INPUT]
+      Name         tail
+      Path         /var/log/containers/*.log
+      Exclude_Path /var/log/containers/*baselime*
+      Tag          kube.*
+      DB           /var/log/flb_kube.db
+      Mem_Buf_Limit 5MB
+      Skip_Long_Lines On
+      Refresh_Interval 10
+      Rotate_Wait   30
+
+    [FILTER]
+      Name         kubernetes
+      Match        kube.*
+      Kube_URL     https://kubernetes.default.svc:443
+      Kube_CA_File /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+      Kube_Token_File /var/run/secrets/kubernetes.io/serviceaccount/token
+      Kube_Tag_Prefix kube.var.log.containers.
+      Merge_Log        On
+      Merge_Log_Key    log_processed
+
+    [OUTPUT]
+      Name         http
+      Host         events.baselime.io
+      Port         443
+      URI          /v1/logs
+      Format       json
+      TLS          On
+      Header       x-api-key API-key
+      Header       baselime-data-source fluentbit/k8s
+      Match        kube.*
+---
+# Source: baselime-logs-exporter/templates/fluentbit-serviceaccount.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: baselime-collector
+rules:
+- apiGroups:
+  - ""
+  resources:
+    - namespaces
+    - deployments
+    - pods
+    - events
+  verbs:
+    - get
+    - list
+    - watch
+---
+# Source: baselime-logs-exporter/templates/fluentbit-serviceaccount.yaml
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: baselime-collector
+roleRef:
+  kind: ClusterRole
+  name: baselime-collector
+  apiGroup: rbac.authorization.k8s.io
+subjects:
+- kind: ServiceAccount
+  name: baselime-collector
+  namespace: default
+---
+# Source: baselime-logs-exporter/templates/fluentbit-daemonset.yaml
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: baselime-collector
+  labels:
+    helm.sh/chart: baselime-logs-exporter-0.1.1
+    app.kubernetes.io/name: baselime-logs-exporter
+    app.kubernetes.io/instance: release-name
+    app.kubernetes.io/version: "1.16.0"
+    app.kubernetes.io/managed-by: Helm
+spec:
+  selector:
+    matchLabels:
+      app: baselime-collector
+  template:
+    metadata:
+      labels:
+        app: baselime-collector
+      annotations:
+        checksum/config: 0ca64a6b5ac653c4620febfbcc281f97a74c93e2469e0f495f0ed3d4c5564ed1
+    spec:
+      serviceAccountName: baselime-metadata-collector
+      containers:
+        - name: fluent-bit
+          image: cr.fluentbit.io/fluent/fluent-bit
+          args:
+            - -c
+            - /etc/fluent-bit/fluent-bit.conf
+          volumeMounts:
+            - mountPath: /etc/fluent-bit
+              name: config-volume
+            - name: varlog
+              mountPath: /var/log
+      volumes:
+        - name: varlog
+          hostPath:
+            path: /var/log
+        - name: config-volume
+          configMap:
+            name: fluentbit-config
+            items:
+              - key: fluent-bit.conf
+                path: fluent-bit.conf
+---
+# Source: baselime-logs-exporter/templates/hpa.yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: release-name-baselime-logs-exporter
+  labels:
+    helm.sh/chart: baselime-logs-exporter-0.1.1
+    app.kubernetes.io/name: baselime-logs-exporter
+    app.kubernetes.io/instance: release-name
+    app.kubernetes.io/version: "1.16.0"
+    app.kubernetes.io/managed-by: Helm
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: DaemonSet
+    name: release-name-baselime-logs-exporter
+  minReplicas: 1
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 80
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
